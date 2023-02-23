@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from ray_utils import *
 
 
 # Misc
@@ -172,10 +173,68 @@ class NeRF(nn.Module):
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
 
 
+
 class MipNeRF(NeRF):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False, min_deg=0, max_deg=10):
         super(MipNeRF, self).__init__(D, W, input_ch, input_ch_views, output_ch, skips, use_viewdirs)
         self.positional_encoding = PositionalEncoding(min_deg, max_deg)
+
+    def forward(self, rays):
+        comp_rgbs = []
+        distances = []
+        accs = []
+        for l in range(self.num_levels):
+            # sample
+            if l == 0:  # coarse grain sample
+                t_vals, (mean, var) = sample_along_rays(rays.origins, rays.directions, rays.radii, self.num_samples,
+                                                        rays.near, rays.far, randomized=self.randomized, lindisp=False,
+                                                        ray_shape=self.ray_shape)
+            else:  # fine grain sample/s
+                t_vals, (mean, var) = resample_along_rays(rays.origins, rays.directions, rays.radii,
+                                                          t_vals.to(rays.origins.device),
+                                                          weights.to(rays.origins.device), randomized=self.randomized,
+                                                          stop_grad=True, resample_padding=self.resample_padding,
+                                                          ray_shape=self.ray_shape)
+            # do integrated positional encoding of samples
+            samples_enc = self.positional_encoding(mean, var)[0]
+            samples_enc = samples_enc.reshape([-1, samples_enc.shape[-1]])
+
+            # predict density
+            new_encodings = self.density_net0(samples_enc)
+            new_encodings = torch.cat((new_encodings, samples_enc), -1)
+            new_encodings = self.density_net1(new_encodings)
+            raw_density = self.final_density(new_encodings).reshape((-1, self.num_samples, 1))
+
+            # predict rgb
+            if self.use_viewdirs:
+                #  do positional encoding of viewdirs
+                viewdirs = self.viewdirs_encoding(rays.viewdirs.to(self.device))
+                viewdirs = torch.cat((viewdirs, rays.viewdirs.to(self.device)), -1)
+                viewdirs = torch.tile(viewdirs[:, None, :], (1, self.num_samples, 1))
+                viewdirs = viewdirs.reshape((-1, viewdirs.shape[-1]))
+                new_encodings = self.rgb_net0(new_encodings)
+                new_encodings = torch.cat((new_encodings, viewdirs), -1)
+                new_encodings = self.rgb_net1(new_encodings)
+            raw_rgb = self.final_rgb(new_encodings).reshape((-1, self.num_samples, 3))
+
+            # Add noise to regularize the density predictions if needed.
+            if self.randomized and self.density_noise:
+                raw_density += self.density_noise * torch.rand(raw_density.shape, dtype=raw_density.dtype, device=raw_density.device)
+
+            # volumetric rendering
+            rgb = raw_rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
+            density = self.density_activation(raw_density + self.density_bias)
+            comp_rgb, distance, acc, weights, alpha = volumetric_rendering(rgb, density, t_vals, rays.directions.to(rgb.device), self.white_bkgd)
+            comp_rgbs.append(comp_rgb)
+            distances.append(distance)
+            accs.append(acc)
+        if self.return_raw:
+            raws = torch.cat((torch.clone(rgb).detach(), torch.clone(density).detach()), -1).cpu()
+            # Predicted RGB values for rays, Disparity map (inverse of depth), Accumulated opacity (alpha) along a ray
+            return torch.stack(comp_rgbs), torch.stack(distances), torch.stack(accs), raws
+        else:
+            # Predicted RGB values for rays, Disparity map (inverse of depth), Accumulated opacity (alpha) along a ray
+            return torch.stack(comp_rgbs), torch.stack(distances), torch.stack(accs)
 
 
 # Ray helpers
@@ -198,6 +257,8 @@ def get_rays_np(H, W, K, c2w): # numpy version
     rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
+    # get the pixel width and height in the world frame
+    pixel_width = np.linalg.norm(rays_d[0,0] - rays_d[0,1])
     return rays_o, rays_d
 
 

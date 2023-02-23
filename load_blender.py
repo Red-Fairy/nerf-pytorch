@@ -34,7 +34,7 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def load_blender_data(basedir, half_res=False, testskip=1):
+def load_blender_data(basedir, half_res=False, testskip=1, radius=4):
     splits = ['train', 'val', 'test']
     metas = {}
     for s in splits:
@@ -54,12 +54,12 @@ def load_blender_data(basedir, half_res=False, testskip=1):
             skip = testskip
             
         for frame in meta['frames'][::skip]:
-            fname = os.path.join(basedir, frame['file_path'] + '.png')
+            fname = os.path.join(basedir, frame['file_path'] + '.png') if '.png' not in frame['file_path'] else os.path.join(basedir, frame['file_path'])
             imgs.append(imageio.imread(fname))
             poses.append(np.array(frame['transform_matrix']))
         imgs = (np.array(imgs) / 255.).astype(np.float32) # keep all 4 channels (RGBA)
         poses = np.array(poses).astype(np.float32)
-        counts.append(counts[-1] + imgs.shape[0])
+        counts.append(counts[-1] + imgs.shape[0]) # number of images
         all_imgs.append(imgs)
         all_poses.append(poses)
     
@@ -72,7 +72,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
     camera_angle_x = float(meta['camera_angle_x'])
     focal = .5 * W / np.tan(.5 * camera_angle_x)
     
-    render_poses = torch.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]], 0)
+    render_poses = torch.stack([pose_spherical(angle, -30.0, radius) for angle in np.linspace(-180,180,40+1)[:-1]], 0)
     
     if half_res:
         H = H//2

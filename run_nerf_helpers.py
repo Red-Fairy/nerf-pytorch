@@ -10,6 +10,30 @@ img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
+# Positional Encoding Module from MipNeRF
+class PositionalEncoding(nn.Module):
+    def __init__(self, min_deg, max_deg):
+        super(PositionalEncoding, self).__init__()
+        self.min_deg = min_deg
+        self.max_deg = max_deg
+        self.scales = nn.Parameter(torch.tensor([2 ** i for i in range(min_deg, max_deg)]), requires_grad=False)
+
+    def forward(self, x, y=None): # mean, var
+        shape = list(x.shape[:-1]) + [-1]
+        x_enc = (x[..., None, :] * self.scales[:, None]).reshape(shape)
+        x_enc = torch.cat((x_enc, x_enc + 0.5 * torch.pi), -1)
+        if y is not None:
+            # IPE
+            y_enc = (y[..., None, :] * self.scales[:, None]**2).reshape(shape)
+            y_enc = torch.cat((y_enc, y_enc), -1)
+            x_ret = torch.exp(-0.5 * y_enc) * torch.sin(x_enc)
+            y_ret = torch.maximum(torch.zeros_like(y_enc), 0.5 * (1 - torch.exp(-2 * y_enc) * torch.cos(2 * x_enc)) - x_ret ** 2)
+            return x_ret, y_ret
+        else:
+            # PE
+            x_ret = torch.sin(x_enc)
+            return x_ret
+
 
 # Positional encoding (section 5.1)
 class Embedder:
@@ -148,6 +172,11 @@ class NeRF(nn.Module):
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
 
 
+class MipNeRF(NeRF):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+        super(MipNeRF, self).__init__(D, W, input_ch, input_ch_views, output_ch, skips, use_viewdirs)
+        self.positional_encoding = PositionalEncoding(min_deg, max_deg)
+
 
 # Ray helpers
 def get_rays(H, W, K, c2w):
@@ -162,7 +191,7 @@ def get_rays(H, W, K, c2w):
     return rays_o, rays_d
 
 
-def get_rays_np(H, W, K, c2w):
+def get_rays_np(H, W, K, c2w): # numpy version
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
     dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame

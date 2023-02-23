@@ -1,0 +1,27 @@
+expname = blender_cube_transparent
+basedir = ./logs
+datadir = ./data/nerf_synthetic/cube_transparent
+dataset_type = blender
+
+no_batching = True
+
+use_viewdirs = True
+white_bkgd = True
+lrate_decay = 500
+
+N_samples = 64
+N_importance = 128
+N_rand = 1024
+N_iters = 5000
+i_testset = 500
+i_video = 5000
+
+near = 4.
+far = 12.
+
+testskip=1
+
+precrop_iters = 0
+precrop_frac = 0.5
+
+half_res = False

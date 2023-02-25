@@ -1,4 +1,4 @@
-expname = blender_cube_transparent
+expname = blender_cube_transparent_train2view
 basedir = ./logs
 datadir = ./data/nerf_synthetic/cube_transparent
 dataset_type = blender

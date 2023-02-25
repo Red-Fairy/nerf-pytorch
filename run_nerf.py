@@ -12,26 +12,16 @@ from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
+from utils import logger
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
-
-class logger(object):
-    def __init__(self, path, name=""):
-        self.path = path
-        self.name = f"{name}.txt" if name != "" else "log.txt"
-
-    def info(self, msg):
-        print(msg)
-        with open(os.path.join(self.path, self.name), 'a') as f:
-            f.write(msg + "\n")
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
@@ -158,7 +148,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        print(i, time.time() - t)
+        print(time.time() - t)
         t = time.time()
         rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
@@ -169,7 +159,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         """
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
+            log.info(p)
         """
 
         if savedir is not None:
@@ -225,12 +215,13 @@ def create_nerf(args):
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
     else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
-
-    print('Found ckpts', ckpts)
+        os.makedirs(os.path.join(basedir, expname, 'weights'), exist_ok=True)
+        ckpts = [os.path.join(basedir, expname, 'weights', f) for f in sorted(os.listdir(os.path.join(basedir, expname, 'weights'))) if 'tar' in f]
+        
     if len(ckpts) > 0 and not args.no_reload:
+        log.info(f'Found ckpts, {str(ckpts)}')
         ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
+        log.info(f'Reloading from, {str(ckpt_path)}')
         ckpt = torch.load(ckpt_path)
 
         start = ckpt['global_step']
@@ -257,7 +248,7 @@ def create_nerf(args):
 
     # NDC only good for LLFF-style forward facing data
     if args.dataset_type != 'llff' or args.no_ndc:
-        print('Not ndc!')
+        log.info('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
 
@@ -422,7 +413,7 @@ def render_rays(ray_batch,
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
-            print(f"! [Numerical Error] {k} contains nan or inf.")
+            log.info(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
 
@@ -503,6 +494,10 @@ def config_parser():
                         help='options: llff / blender / deepvoxels')
     parser.add_argument("--testskip", type=int, default=8, 
                         help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
+    parser.add_argument('--train_views', type=int, default=100,
+                        help='number of views to use for training')
+    parser.add_argument('--test_views', type=int, default=100, 
+                        help='number of views to use for testing')
 
     ## deepvoxels flags
     parser.add_argument("--shape", type=str, default='greek', 
@@ -548,6 +543,22 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
 
+    # Create log dir and copy the config file
+    basedir = args.basedir
+    expname = args.expname
+    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    global log
+    log = logger(os.path.join(basedir, expname))
+    f = os.path.join(basedir, expname, 'args.txt')
+    with open(f, 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    if args.config is not None:
+        f = os.path.join(basedir, expname, 'config.txt')
+        with open(f, 'w') as file:
+            file.write(open(args.config, 'r').read())
+
     # Load data
     K = None
     if args.dataset_type == 'llff':
@@ -561,14 +572,14 @@ def train():
             i_test = [i_test]
 
         if args.llffhold > 0:
-            print('Auto LLFF holdout,', args.llffhold)
+            log.info(f'Auto LLFF holdout, {args.llffhold}')
             i_test = np.arange(images.shape[0])[::args.llffhold]
 
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
                         (i not in i_test and i not in i_val)])
 
-        print('DEFINING BOUNDS')
+        log.info('DEFINING BOUNDS')
         if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
@@ -576,10 +587,10 @@ def train():
         else:
             near = 0.
             far = 1.
-        print('NEAR FAR', near, far)
+        log.info(f'NEAR FAR, {near}, {far}')
 
     elif args.dataset_type == 'blender':
-        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip, radius=(args.near+args.far)/2)
+        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, radius=(args.near+args.far)/2, train_views=args.train_views, test_views=args.test_views)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
         print(i_split)
@@ -594,8 +605,8 @@ def train():
 
     elif args.dataset_type == 'LINEMOD':
         images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
-        print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
-        print(f'[CHECK HERE] near: {near}, far: {far}.')
+        log.info(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
+        log.info(f'[CHECK HERE] near: {near}, far: {far}.')
         i_train, i_val, i_test = i_split
 
         if args.white_bkgd:
@@ -617,7 +628,7 @@ def train():
         far = hemi_R+1.
 
     else:
-        print('Unknown dataset type', args.dataset_type, 'exiting')
+        log.info(f'Unknown dataset type {args.dataset_type}, exiting')
         return
 
     # Cast intrinsics to right types
@@ -635,21 +646,6 @@ def train():
     if args.render_test:
         render_poses = np.array(poses[i_test])
 
-    # Create log dir and copy the config file
-    basedir = args.basedir
-    expname = args.expname
-    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    log = logger(os.path.join(basedir, expname))
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
-
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
@@ -666,7 +662,7 @@ def train():
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
-        print('RENDER ONLY')
+        log.info('RENDER ONLY')
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
@@ -675,12 +671,12 @@ def train():
                 # Default is smoother render_poses path
                 images = None
 
-            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+            testsavedir = os.path.join(basedir, expname, 'video_{:06d}'.format(start+1))
             os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', render_poses.shape)
+            log.info(f'test poses shape, {str(render_poses.shape)}')
 
             rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
-            print('Done rendering', testsavedir)
+            log.info(f'Done rendering {testsavedir}')
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
@@ -690,18 +686,18 @@ def train():
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
-        print('get rays')
+        log.info('get rays')
         rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
-        print('done, concats')
+        log.info('done, concats')
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3], i.e., [N, 3, H, W, 3]
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
         rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
-        print('shuffle rays')
+        log.info('shuffle rays')
         np.random.shuffle(rays_rgb) # shuffle along first axis, shape: [(N-1)*H*W, ro+rd+rgb, 3]
 
-        print('done')
+        log.info('done')
         i_batch = 0
 
     # Move training data to GPU
@@ -713,10 +709,12 @@ def train():
 
 
     N_iters = args.N_iters + 1
-    print('Begin')
-    print('TRAIN views are', i_train)
-    print('TEST views are', i_test)
-    print('VAL views are', i_val)
+    # set train views also be the test views
+    i_test = np.concatenate((i_train, i_test), axis=0)
+    log.info('Begin')
+    log.info(f'TRAIN views are, {str(i_train)}')
+    log.info(f'TEST views are, {str(i_test)}')
+    log.info(f'VAL views are, {str(i_val)}')
 
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
@@ -734,7 +732,7 @@ def train():
 
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
-                print("Shuffle data after an epoch!")
+                log.info("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
@@ -758,7 +756,7 @@ def train():
                             torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
                         ), -1)
                     if i == start:
-                        print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
+                        log.info(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
@@ -799,7 +797,7 @@ def train():
         ################################
 
         dt = time.time()-time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
+        # log.info(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
         # Rest is logging
@@ -814,13 +812,13 @@ def train():
                 'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, path)
-            print('Saved checkpoints at', path)
+            log.info(f'Saved checkpoints at {path}')
 
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
+            log.info(f'Done, saving, {str(rgbs.shape)}, {str(disps.shape)}')
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
@@ -835,19 +833,19 @@ def train():
         if i%args.i_testset==0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
+            log.info(f'test poses shape {str(poses[i_test].shape)}')
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+            log.info('Saved test set')
 
 
-    
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            log.info(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
         """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
+            log.info(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+            log.info('iter time {:.05f}'.format(dt))
 
             with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
                 tf.contrib.summary.scalar('loss', loss)

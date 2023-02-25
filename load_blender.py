@@ -34,8 +34,8 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def load_blender_data(basedir, half_res=False, testskip=1, radius=4):
-    splits = ['train', 'val', 'test']
+def load_blender_data(basedir, half_res=False, radius=4, train_views=100, test_views=100):
+    splits = ['train', 'test', 'test']
     metas = {}
     for s in splits:
         with open(os.path.join(basedir, 'transforms_{}.json'.format(s)), 'r') as fp:
@@ -48,12 +48,20 @@ def load_blender_data(basedir, half_res=False, testskip=1, radius=4):
         meta = metas[s]
         imgs = []
         poses = []
-        if s=='train' or testskip==0:
-            skip = 1
-        else:
-            skip = testskip
+        # if s=='train' or testskip==0:
+        #     skip = 1
+        # else:
+        #     skip = testskip
             
-        for frame in meta['frames'][::skip]:
+        if s=='train':
+            views = min(len(meta['frames']), train_views)
+        else:
+            views = min(len(meta['frames']), test_views)
+        # random permutation
+        perm = np.random.permutation(len(meta['frames']))
+        meta['frames'] = [meta['frames'][i] for i in perm]
+
+        for frame in meta['frames'][:views]:
             fname = os.path.join(basedir, frame['file_path'] + '.png') if '.png' not in frame['file_path'] else os.path.join(basedir, frame['file_path'])
             imgs.append(imageio.imread(fname))
             poses.append(np.array(frame['transform_matrix']))

@@ -67,7 +67,7 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
 
 def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
-                  use_viewdirs=False, c2w_staticcam=None,
+                  use_viewdirs=False, c2w_staticcam=None, object_extrinsics=None,
                   **kwargs):
     """Render rays
     Args:
@@ -85,6 +85,8 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
       use_viewdirs: bool. If True, use viewing direction of a point in space in model.
       c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
        camera while using other c2w argument for viewing directions.
+      object_extrinsics: array of shape [3, 4]. If not None, move the object according to the 
+      transform matrix in the canonical space.
     Returns:
       rgb_map: [batch_size, 3]. Predicted RGB values for rays.
       disp_map: [batch_size]. Disparity map. Inverse of depth.
@@ -94,6 +96,8 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
+        # if object_extrinsics is not None:
+        print(rays_o.shape, rays_d.shape)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -148,7 +152,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        print(time.time() - t)
+        # print(time.time() - t)
         t = time.time()
         rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())

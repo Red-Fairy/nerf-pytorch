@@ -353,3 +353,24 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
 
     return samples
+
+def construct_transform_matrix(angles, translations):
+    """
+    angles: [3] in degrees,
+    translations: [3]
+    """
+    angle_x, angle_y, angle_z = np.deg2rad(angles)
+    Rx = np.array([[1, 0, 0],
+                [0, np.cos(angle_x), -np.sin(angle_x)],
+                [0, np.sin(angle_x), np.cos(angle_x)]])
+    Ry = np.array([[np.cos(angle_y), 0, np.sin(angle_y)],
+                [0, 1, 0],
+                [-np.sin(angle_y), 0, np.cos(angle_y)]])
+    Rz = np.array([[np.cos(angle_z), -np.sin(angle_z), 0],
+                [np.sin(angle_z), np.cos(angle_z), 0],
+                [0, 0, 1]])
+    R = Rz @ Ry @ Rx  # combine the three rotations using matrix multiplication
+
+    T = np.concatenate([R, translations[:, np.newaxis]], axis=-1)
+    T = np.concatenate([T, np.array([[0, 0, 0, 1]])], axis=0)
+    return torch.Tensor(T)

@@ -85,7 +85,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
       use_viewdirs: bool. If True, use viewing direction of a point in space in model.
       c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
        camera while using other c2w argument for viewing directions.
-      object_extrinsics: array of shape [3, 4]. If not None, move the object according to the 
+      object_extrinsics: array of shape [4, 4]. If not None, move the object according to the 
       transform matrix in the canonical space.
     Returns:
       rgb_map: [batch_size, 3]. Predicted RGB values for rays.
@@ -96,8 +96,13 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
-        # if object_extrinsics is not None:
-        print(rays_o.shape, rays_d.shape)
+        if object_extrinsics is not None:
+            # move the object according to the transform matrix in the canonical space
+            extrinsics = torch.inverse(object_extrinsics)
+            rays_o, rays_d = rays_o.view(-1,3), rays_d.view(-1,3)
+            rays_o = torch.matmul(extrinsics, torch.cat((rays_o, torch.ones((rays_o.shape[0], 1)).to(device)), dim=1).t()).t()[:, :3]
+            rays_d = torch.matmul(extrinsics[:3, :3], rays_d.t()).t()
+            rays_o, rays_d = rays_o.view(H, W, 3), rays_d.view(H, W, 3)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -137,7 +142,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0, object_extrinsics=None):
 
     H, W, focal = hwf
 
@@ -154,7 +159,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         # print(time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], object_extrinsics=object_extrinsics, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -479,6 +484,12 @@ def config_parser():
                         help='log2 of max freq for positional encoding (2D direction)')
     parser.add_argument("--raw_noise_std", type=float, default=0., 
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+    parser.add_argument("--translate_x", type=float, default=0.)
+    parser.add_argument("--translate_y", type=float, default=0.)
+    parser.add_argument("--translate_z", type=float, default=0.)
+    parser.add_argument("--rotate_x", type=float, default=0., help='rotation in degrees')
+    parser.add_argument("--rotate_y", type=float, default=0., help='rotation in degrees')
+    parser.add_argument("--rotate_z", type=float, default=0., help='rotation in degrees')
 
     parser.add_argument("--render_only", action='store_true', 
                         help='do not optimize, reload weights and render out render_poses path')
@@ -679,9 +690,12 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             log.info(f'test poses shape, {str(render_poses.shape)}')
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            object_extrinsics = construct_transform_matrix(np.array([args.rotate_x, args.rotate_y, args.rotate_z]), 
+                                                            np.array([args.translate_x, args.translate_y, args.translate_z]))
+
+            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor, object_extrinsics=object_extrinsics)
             log.info(f'Done rendering {testsavedir}')
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+            imageio.mimwrite(os.path.join(testsavedir, 'trans_video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
 
